@@ -38,7 +38,7 @@ def liquidation_price(entry: float, leverage: float, direction: str, mmr: float)
 
 
 def plan_position(equity: float, direction: str, entry: float, stop: float, target: float,
-                  cfg: RiskConfig) -> PositionPlan:
+                  cfg: RiskConfig, risk_mult: float = 1.0) -> PositionPlan:
     if direction == "long" and not stop < entry < target:
         raise ValueError("Long: musí platit stop < vstup < cíl")
     if direction == "short" and not target < entry < stop:
@@ -48,7 +48,7 @@ def plan_position(equity: float, direction: str, entry: float, stop: float, targ
     loss_per_unit = abs(entry - stop) + cost * (entry + stop)
     gain_per_unit = abs(target - entry) - cost * (entry + target)
 
-    risk_budget = equity * cfg.risk_pct / 100
+    risk_budget = equity * cfg.risk_pct / 100 * risk_mult
     qty = risk_budget / loss_per_unit
     notional = qty * entry
     warnings = []

@@ -44,7 +44,8 @@ def cmd_check(args, scfg, rcfg):
         decision = "VSTUP" if sig.ok else ("ČEKAT" if sig.direction else "NIC")
         plan = None
         if sig.direction:
-            plan = plan_position(args.equity, sig.direction, sig.entry, sig.stop, sig.target, rcfg)
+            plan = plan_position(args.equity, sig.direction, sig.entry, sig.stop, sig.target, rcfg,
+                                 sig.risk_mult or 1.0)
             if sig.ok and not plan.ok:
                 decision = "ČEKAT"
         print(f"  → {decision}" + (f" ({sig.direction.upper()})" if sig.direction else ""))

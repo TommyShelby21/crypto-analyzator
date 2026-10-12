@@ -29,6 +29,7 @@ class Signal:
     entry: float | None = None
     stop: float | None = None
     target: float | None = None
+    risk_mult: float = 1.0         # < 1 v přechodném režimu trhu
 
     @property
     def ok(self) -> bool:
@@ -44,13 +45,29 @@ def prepare(df: pd.DataFrame, cfg: StrategyConfig) -> pd.DataFrame:
     d_slope = d_ema - d_ema.shift(cfg.trend_slope_days)
     d = pd.DataFrame({
         "d_close": daily["close"], "d_ema": d_ema, "d_slope": d_slope,
-    }).shift(1)  # hodnota uzavřeného dne D platí až pro svíčky dne D+1
+    })
+    if cfg.regime_ema:
+        r_ema = ema(daily["close"], cfg.regime_ema)
+        d["r_ema"] = r_ema
+        d["r_slope"] = r_ema - r_ema.shift(cfg.regime_slope_days)
+    d = d.shift(1)  # hodnota uzavřeného dne D platí až pro svíčky dne D+1
     day = out.index.floor("1D")
     for col in d.columns:
         out[col] = d[col].reindex(day).to_numpy()
 
     out["trend_up"] = (out["d_close"] > out["d_ema"]) & (out["d_slope"] > 0)
     out["trend_down"] = (out["d_close"] < out["d_ema"]) & (out["d_slope"] < 0)
+
+    # režim: NaN (málo historie) = bez omezení
+    regime = pd.Series(None, index=out.index, dtype=object)
+    if cfg.regime_ema:
+        known = out["r_ema"].notna() & out["r_slope"].notna()
+        above = out["d_close"] > out["r_ema"]
+        rising = out["r_slope"] > 0
+        regime[known & above & rising] = "bull"
+        regime[known & ~above & ~rising] = "bear"
+        regime[known & (above != rising)] = "přechod"
+    out["regime"] = regime
 
     out["ema_pull"] = ema(out["close"], cfg.pullback_ema)
     out["rsi"] = rsi(out["close"], cfg.rsi_period)
@@ -78,18 +95,34 @@ def evaluate(p: pd.DataFrame, i: int, cfg: StrategyConfig, entry: float | None =
     if r[["d_ema", "d_slope", "ema_pull", "atr", "res_high"]].isna().any():
         return Signal(t, None, [Check("Dost historie pro indikátory", False)])
 
+    regime = r["regime"] if isinstance(r["regime"], str) else None
+    regime_check = None
+    risk_mult = 1.0
+    if regime is not None:
+        rdist = (r["d_close"] / r["r_ema"] - 1) * 100
+        rdesc = f"cena {rdist:+.1f} % vůči EMA{cfg.regime_ema}, EMA {'roste' if r['r_slope'] > 0 else 'klesá'}"
+        if regime == "přechod":
+            risk_mult = cfg.regime_transition_risk
+            rdesc += f" – možná změna trendu, riziko ×{risk_mult:g}"
+        regime_check = Check(f"Režim trhu: {regime}", risk_mult > 0, rdesc)
+
     if r["trend_up"]:
         direction = "long"
     elif r["trend_down"] and cfg.allow_shorts:
         direction = "short"
     else:
         dist = (r["d_close"] / r["d_ema"] - 1) * 100
-        return Signal(t, None, [Check("Denní trend", False,
-                                      f"cena {dist:+.1f} % vůči EMA{cfg.trend_ema}, sklon {'↑' if r['d_slope'] > 0 else '↓'} – bez jasného trendu")])
+        checks = [regime_check] if regime_check else []
+        return Signal(t, None, checks + [Check("Denní trend", False,
+                                               f"cena {dist:+.1f} % vůči EMA{cfg.trend_ema}, sklon {'↑' if r['d_slope'] > 0 else '↓'} – bez jasného trendu")])
+
+    if (direction == "long" and regime == "bear") or (direction == "short" and regime == "bull"):
+        regime_check.passed = False
+        regime_check.detail += f" – {direction} proti režimu se nebere"
 
     entry = float(r["close"] if entry is None else entry)
     a = r["atr"]
-    checks = []
+    checks = [regime_check] if regime_check else []
     long = direction == "long"
     dist = (r["d_close"] / r["d_ema"] - 1) * 100
     checks.append(Check("Denní trend", True,
@@ -130,4 +163,4 @@ def evaluate(p: pd.DataFrame, i: int, cfg: StrategyConfig, entry: float | None =
     checks.append(Check(f"Volná cesta k cíli {cfg.target_r:g}R", not blocked,
                         f"{level_name} {_fmt(level)}" + (" leží před cílem" if blocked else "")))
 
-    return Signal(t, direction, checks, entry, float(stop), float(target))
+    return Signal(t, direction, checks, entry, float(stop), float(target), risk_mult)

@@ -64,7 +64,7 @@ def run_backtest(df: pd.DataFrame, equity: float = 1000.0,
         if not sig.ok:
             i += 1
             continue
-        plan = plan_position(equity, sig.direction, sig.entry, sig.stop, sig.target, rcfg)
+        plan = plan_position(equity, sig.direction, sig.entry, sig.stop, sig.target, rcfg, sig.risk_mult)
         if not plan.ok:
             i += 1
             continue

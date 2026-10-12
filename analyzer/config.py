@@ -8,6 +8,13 @@ class StrategyConfig:
     trend_ema: int = 50              # cena musí být nad/pod touto EMA
     trend_slope_days: int = 5        # EMA musí růst/klesat za posledních N dní
 
+    # --- režim trhu (pomalejší filtr nad denním trendem) ---
+    # bull = cena nad rostoucí EMA -> jen longy; bear = cena pod klesající EMA -> jen shorty;
+    # přechod = cena už EMA prorazila, ale ta ještě neotočila -> oba směry se sníženým rizikem
+    regime_ema: int = 200            # 0 = režim vypnutý
+    regime_slope_days: int = 10      # sklon EMA za posledních N dní
+    regime_transition_risk: float = 0.5  # násobek rizika v přechodu (0 = v přechodu neobchodovat)
+
     # --- vstup (4h graf) ---
     pullback_ema: int = 20           # pullback k této EMA
     pullback_tolerance: float = 0.005  # low/high se musí přiblížit k EMA na 0,5 %

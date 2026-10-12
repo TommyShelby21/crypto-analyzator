@@ -32,17 +32,23 @@ def fetch_ohlcv(symbol: str = "BTC/USDT:USDT", timeframe: str = "4h",
     path = _cache_path("ohlcv", symbol, timeframe)
     since_ms = int(pd.Timestamp(since, tz="UTC").timestamp() * 1000)
 
+    ex = _exchange()
     cached = None
     if use_cache and path.exists():
         cached = pd.read_csv(path, index_col=0, parse_dates=True)
         if cached.index.tz is None:
             cached.index = cached.index.tz_localize("UTC")
-        if len(cached) and cached.index[0] <= pd.Timestamp(since, tz="UTC"):
+        first_ms = int(cached.index[0].timestamp() * 1000) if len(cached) else None
+        # trh mohl začít až po `since` (ETH perp od 2021-03-15) – pak je cache platná,
+        # když burza před první uloženou svíčkou nic nemá
+        valid = first_ms is not None and (
+            first_ms <= since_ms or
+            (ex.fetch_ohlcv(symbol, timeframe, since=since_ms, limit=1) or [[first_ms]])[0][0] >= first_ms)
+        if valid:
             since_ms = int(cached.index[-1].timestamp() * 1000) + TF_MS[timeframe]
         else:
             cached = None
 
-    ex = _exchange()
     rows, cursor = [], since_ms
     now_ms = ex.milliseconds()
     while cursor < now_ms:
