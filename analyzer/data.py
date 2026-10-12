@@ -12,10 +12,10 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 TF_MS = {"1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000}
 
 
-def _exchange():
+def _exchange(types=("linear",)):
     import ccxt  # import až tady, aby šly testy spustit i bez ccxt
     ex = ccxt.bybit({"enableRateLimit": True, "options": {"defaultType": "swap"}})
-    ex.options["fetchMarkets"]["types"] = ["linear"]  # jen USDT perpetuals, rychlejší start
+    ex.options["fetchMarkets"]["types"] = list(types)  # jen potřebné trhy, rychlejší start
     return ex
 
 
@@ -108,3 +108,12 @@ def fetch_funding(symbol: str = "BTC/USDT:USDT", since: str = "2021-01-01",
     s = s[~s.index.duplicated(keep="last")].sort_index()
     s.rename("rate").to_frame().to_csv(path)
     return s[s.index >= pd.Timestamp(since, tz="UTC")]
+
+
+def fetch_market_limits(symbol: str = "BTC/USDT:USDT") -> dict:
+    """Krok a minima objednávky. Perp BTC: krok 0,001 BTC; spot BTC/USDT: krok 0,000001, min. 5 USDT."""
+    ex = _exchange(("linear",) if ":" in symbol else ("spot",))
+    ex.load_markets()
+    m = ex.market(symbol)
+    return {"qty_step": m["precision"]["amount"], "min_qty": m["limits"]["amount"]["min"],
+            "min_cost": m["limits"]["cost"]["min"]}

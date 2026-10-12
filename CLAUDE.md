@@ -8,8 +8,11 @@ krypto futures – Bybit USDT perpetual. Nástroj NEOBCHODUJE sám a nepoužív�
 API klíče s právem obchodovat. Postup: backtest → paper trading → malé reálné peníze.
 
 ## Rozhodnutí
-- Trh: BTC a ETH (altcoiny zatím ne), futures, isolated margin.
-- Riziko 1 % účtu na obchod, páka max 3×, likvidace aspoň 1R za stopem.
+- Trh: BTC a ETH (altcoiny zatím ne), Bybit USDT perpetual futures, isolated margin, páka 5×.
+  (`--market spot` jako alternativa.)
+- Účet 267 USDT. Velikost: pevný margin 5 USDT × 5 = pozice 25 USDT. U BTC je minimum burzy
+  0,001 BTC (~83 USDT, margin ~17 USDT) – použije se, pokud ztráta na stopu nepřesáhne
+  `max_risk_pct` = 1,5 % účtu, jinak se obchod zamítne. Likvidace aspoň 1R za stopem.
 - Strategie: režim trhu (EMA200) → denní trend (EMA50 + sklon) → pullback k EMA20 na 4h
   → potvrzovací svíčka → RSI filtr → stop za swingem (0,5–3 ATR) → cíl 2R bez rezistence v cestě
   → časový stop 5 dní.
@@ -30,7 +33,8 @@ API klíče s právem obchodovat. Postup: backtest → paper trading → malé r
 - `analyzer/strategy.py` – `prepare()` indikátory, `evaluate()` checklist
 - `analyzer/risk.py` – velikost pozice, páka, likvidace
 - `analyzer/backtest.py` – backtest, `summarize`, `monte_carlo`, `lookahead_check`
-- `analyzer/cli.py` – příkazy `check`, `backtest`, `lookahead`
+- `analyzer/review.py` – posouzení vlastního nápadu: návrh stopu/cíle, historické analogie
+- `analyzer/cli.py` – příkazy `check`, `backtest`, `lookahead`, `review`
 - `tests/` – pytest na syntetických datech (offline)
 
 ## Pravidla pro úpravy

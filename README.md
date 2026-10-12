@@ -22,10 +22,18 @@ python -m analyzer backtest BTC ETH --equity 1000 --since 2021-01-01 --split 202
 python -m analyzer lookahead BTC
 
 # 3) Denní/4h kontrola: mám vstoupit?
-python -m analyzer check BTC ETH --equity 800
+python -m analyzer check BTC ETH
+
+# 4) Mám vlastní nápad („long BTC na týden“) – posuď ho
+python -m analyzer review BTC long --days 7
 ```
 
-Užitečné přepínače: `--risk 0.5` (% účtu na obchod), `--max-leverage 2`, `--long-only`.
+`review` sám navrhne stop (za nejbližší swing 1–4 ATR od ceny) a cíl (2R, nebo těsně
+před rezistencí), spočítá pozici a ukáže, jak dopadly stejné obchody (stop a cíl v ATR)
+v podobných historických situacích – po poplatcích, skluzu a fundingu. Na konci vypíše
+body pro a proti. Parametry jsou v `ReviewConfig` v `analyzer/config.py`.
+
+Užitečné přepínače: `--market perp|spot` (výchozí perp), `--margin-usdt 5` (vlastní peníze do pozice, pozice = margin × páka), `--leverage 5`, `--risk-usdt 5` nebo `--risk 1` (velikost podle ztráty na stopu místo marginu), `--equity` (výchozí 267), `--long-only`. U `review` navíc `--entry 82250` (limitní vstup) a `--levels 82000,87000` (tvoje úrovně z grafu – nástroj je použije pro stop i cíl).
 Všechna pravidla a parametry jsou v `analyzer/config.py`.
 
 ## Strategie (výchozí)
