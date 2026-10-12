@@ -1,0 +1,6 @@
+data/
+__pycache__/
+.venv/
+trades_*.csv
+.DS_Store
+journal.csv
