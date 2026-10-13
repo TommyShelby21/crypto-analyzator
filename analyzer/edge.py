@@ -48,7 +48,7 @@ INDICATORS = [
 
 def compute_indicators(p: pd.DataFrame, funding: pd.Series | None = None,
                        btc_close: pd.Series | None = None) -> pd.DataFrame:
-    """p = výstup `prepare()`. Hodnota na svíčce i používá jen data známá při jejím uzavření."""
+    """p = výstup `prepare_4h()`. Hodnota na svíčce i používá jen data známá při jejím uzavření."""
     d = BARS_PER_DAY
     c = p["close"]
     out = pd.DataFrame(index=p.index)
@@ -56,7 +56,7 @@ def compute_indicators(p: pd.DataFrame, funding: pd.Series | None = None,
     out["momentum_60d"] = c / c.shift(60 * d) - 1
     hi, lo = p["high"].rolling(20 * d).max(), p["low"].rolling(20 * d).min()
     out["kanal_20d"] = (c - lo) / (hi - lo)
-    out["od_ema20_atr"] = (c - p["ema_pull"]) / p["atr"]
+    out["od_ema20_atr"] = (c - p["ema_fast"]) / p["atr"]
     out["volatilita"] = p["atr"] / p["atr"].rolling(90 * d).median()
     out["objem"] = p["volume"].rolling(d).sum() / p["volume"].rolling(30 * d).sum() * 30
 

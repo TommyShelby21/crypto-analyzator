@@ -11,9 +11,9 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from .config import ReviewConfig, RiskConfig, StrategyConfig
+from .config import MarketConfig, ReviewConfig, RiskConfig
 from .risk import PositionPlan, fee_rate, plan_position
-from .strategy import Signal, evaluate
+from .strategy import Signal
 
 BARS_PER_DAY = 6  # 4h svíčky
 
@@ -48,7 +48,7 @@ class Review:
     entry: float
     atr: float
     rsi: float
-    ema_pull: float
+    ema_fast: float
     trend: str
     regime: str | None
     horizon_days: int
@@ -56,7 +56,7 @@ class Review:
     analogs: AnalogStats
     baseline: AnalogStats
     chosen_r: float
-    signal: Signal
+    signal: Signal | None   # denní trend following na stejném coinu
     plan: PositionPlan | None
     funding_rate: float
     hold_r: float           # cena držení (funding / úrok z půjčky) za celý horizont v R
@@ -254,11 +254,13 @@ def analog_stats(p: pd.DataFrame, mask: np.ndarray, label: str, k_atr: float, mu
     return st
 
 
-def review(p: pd.DataFrame, direction: str, equity: float, scfg: StrategyConfig, rcfg: RiskConfig,
+def review(p: pd.DataFrame, direction: str, equity: float, mcfg: MarketConfig, rcfg: RiskConfig,
            rv: ReviewConfig, funding_rate: float | None = None, entry: float | None = None,
-           limits: dict | None = None, user_levels: list[float] | None = None) -> Review:
-    """limits = qty_step / min_qty / min_cost burzy (viz plan_position)."""
-    """p = výstup `prepare()`; posuzuje se poslední uzavřená svíčka."""
+           limits: dict | None = None, user_levels: list[float] | None = None,
+           trend_signal: Signal | None = None) -> Review:
+    """p = výstup `prepare_4h()`; posuzuje se poslední uzavřená svíčka.
+    limits = qty_step / min_qty / min_cost burzy (viz plan_position).
+    trend_signal = signál denního trend followingu pro srovnání."""
     cur = p.iloc[-1]
     if pd.isna(cur["atr"]) or pd.isna(cur["d_ema"]):
         raise ValueError("Málo historie pro indikátory")
@@ -278,7 +280,7 @@ def review(p: pd.DataFrame, direction: str, equity: float, scfg: StrategyConfig,
     mults = sorted({1.0, 1.5, 2.0, 3.0, chosen_r})
     cost_frac = 2 * (fee_rate(rcfg) + rcfg.slippage)
 
-    risk_mult = scfg.regime_transition_risk if regime == "přechod" else 1.0
+    risk_mult = mcfg.regime_transition_risk if regime == "přechod" else 1.0
     plan = plan_position(equity, direction, entry, levels.stop, levels.target, rcfg, risk_mult,
                          **(limits or {})) if risk_mult > 0 else None
     if rcfg.market == "spot":
@@ -309,8 +311,6 @@ def review(p: pd.DataFrame, direction: str, equity: float, scfg: StrategyConfig,
             break
     analogs = analogs or st
 
-    sig = evaluate(p, len(p) - 1, scfg, entry=entry)
-
     # --- body pro a proti ---
     flags = []
     if (long and cur["trend_up"]) or (not long and cur["trend_down"]):
@@ -318,11 +318,11 @@ def review(p: pd.DataFrame, direction: str, equity: float, scfg: StrategyConfig,
     elif (long and cur["trend_down"]) or (not long and cur["trend_up"]):
         flags.append(Flag("bad", f"{direction.capitalize()} proti dennímu trendu ({trend})"))
     else:
-        flags.append(Flag("warn", f"Denní trend není jasný (cena vs. EMA{scfg.trend_ema} a její sklon si odporují)"))
+        flags.append(Flag("warn", f"Denní trend není jasný (cena vs. EMA{mcfg.trend_ema} a její sklon si odporují)"))
 
     if regime:
         if (long and regime == "bear") or (not long and regime == "bull"):
-            flags.append(Flag("bad", f"Režim trhu {regime} (EMA{scfg.regime_ema}) – {direction} jde proti"))
+            flags.append(Flag("bad", f"Režim trhu {regime} (EMA{mcfg.regime_ema}) – {direction} jde proti"))
         elif regime == "přechod":
             flags.append(Flag("warn", f"Režim trhu v přechodu – riziko sníženo na ×{risk_mult:g}"))
         else:
@@ -333,12 +333,12 @@ def review(p: pd.DataFrame, direction: str, equity: float, scfg: StrategyConfig,
     if not long and cur["rsi"] < 30:
         flags.append(Flag("warn", f"RSI {cur['rsi']:.0f} – přeprodáno, prodáváš po silném poklesu"))
 
-    ext = sign * (entry - cur["ema_pull"]) / a
+    ext = sign * (entry - cur["ema_fast"]) / a
     if ext > rv.max_extension_atr:
-        flags.append(Flag("warn", f"Cena je {ext:.1f} ATR od EMA{scfg.pullback_ema} (4h, {_fmt(cur['ema_pull'])}) – "
+        flags.append(Flag("warn", f"Cena je {ext:.1f} ATR od EMA{mcfg.fast_ema} (4h, {_fmt(cur['ema_fast'])}) – "
                                   "vstupuješ do nataženého pohybu, lepší vstup bývá u EMA"))
     elif ext < 0:
-        flags.append(Flag("warn", f"Cena je {'pod' if long else 'nad'} EMA{scfg.pullback_ema} na 4h – krátkodobě jde proti tobě"))
+        flags.append(Flag("warn", f"Cena je {'pod' if long else 'nad'} EMA{mcfg.fast_ema} na 4h – krátkodobě jde proti tobě"))
 
     flags += levels.flags
 
@@ -357,13 +357,15 @@ def review(p: pd.DataFrame, direction: str, equity: float, scfg: StrategyConfig,
     else:
         flags.append(Flag("ok", f"Historicky podobné obchody vydělávaly: {hist}"))
 
-    if sig.ok and sig.direction == direction:
-        flags.append(Flag("ok", "Tvoje systematická pravidla dávají teď stejný signál"))
-    else:
-        failed = [c.name for c in sig.checks if not c.passed]
-        why = ", ".join(failed) if sig.direction == direction else \
-            (f"pravidla by šla {sig.direction}" if sig.direction else "pravidla teď nevidí směr")
-        flags.append(Flag("warn", f"Systematická pravidla by teď nevstoupila ({why})"))
+    sig = trend_signal
+    if sig is not None:
+        if sig.ok and sig.direction == direction:
+            flags.append(Flag("ok", f"Trend following (denní) dává teď stejný signál – {sig.checks[0].detail}"))
+        elif sig.direction and sig.direction != direction:
+            flags.append(Flag("bad", f"Trend following (denní) dává opačný signál ({sig.direction})"))
+        else:
+            why = "; ".join(c.detail or c.name for c in sig.checks if not c.passed)
+            flags.append(Flag("warn", f"Trend following (denní) teď nevstupuje ({why})"))
 
     if plan is None:
         flags.append(Flag("bad", "Podle nastavení se v tomhle režimu neobchoduje"))
@@ -378,5 +380,5 @@ def review(p: pd.DataFrame, direction: str, equity: float, scfg: StrategyConfig,
         for w in plan.warnings:
             flags.append(Flag("bad" if not plan.ok else "warn", w))
 
-    return Review(p.index[-1], direction, entry, a, float(cur["rsi"]), float(cur["ema_pull"]), trend, regime,
+    return Review(p.index[-1], direction, entry, a, float(cur["rsi"]), float(cur["ema_fast"]), trend, regime,
                   rv.horizon_days, levels, analogs, baseline, chosen_r, sig, plan, funding_rate, hold_r, flags)

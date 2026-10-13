@@ -3,9 +3,10 @@ import pandas as pd
 import pytest
 
 from analyzer.backtest import lookahead_check, run_backtest, summarize
-from analyzer.config import RiskConfig, StrategyConfig
+from analyzer.config import MarketConfig, RiskConfig, StrategyConfig
+from analyzer.market import prepare_4h
 from analyzer.risk import plan_position
-from analyzer.strategy import evaluate, prepare
+from analyzer.strategy import entry_signal, exit_signal, prepare, to_daily
 
 PERP = dict(market="perp", margin_usdt=0)  # perp futures, velikost podle rizika
 
@@ -53,30 +54,61 @@ def test_no_lookahead_bias():
 
 def test_daily_trend_uses_only_closed_days():
     df = synthetic(1500)
-    p = prepare(df, StrategyConfig())
+    p = prepare_4h(df, MarketConfig())
     daily_close = df["close"].resample("1D").last()
     ts = pd.Timestamp("2021-06-10 12:00", tz="UTC")
     assert p.loc[ts, "d_close"] == pytest.approx(daily_close.loc[pd.Timestamp("2021-06-09", tz="UTC")])
 
 
 def test_backtest_runs_and_is_consistent():
-    df = synthetic(3000)
+    df = synthetic(6000)
     trades, curve = run_backtest(df, 1000.0)
     assert trades, "na trendujících datech by měly vzniknout obchody"
     s = summarize(trades, 1000.0)
     assert s["obchodů"] == len(trades)
     assert curve.iloc[-1] == pytest.approx(trades[-1].equity_after)
+    assert {t.exit_reason for t in trades} <= {"stop", "stop (gap)", "otočení trendu", "otevřený"}
+    for a, b in zip(trades, trades[1:]):
+        assert a.exit_time <= b.entry_time                    # vždy jen jedna pozice
     for t in trades:
-        assert t.entry_time < t.exit_time or t.exit_reason in ("stop", "cíl")
         if t.exit_reason == "stop":
             assert t.r < 0
+        assert t.mfe_r >= 0
 
 
-def test_evaluate_reports_reasons():
-    df = synthetic(1500)
-    p = prepare(df, StrategyConfig())
-    sig = evaluate(p, len(p) - 1, StrategyConfig())
+def test_entry_signal_reports_reasons():
+    p = prepare(synthetic(1500), StrategyConfig())
+    sig = entry_signal(p, len(p) - 1, StrategyConfig())
     assert sig.checks and all(c.name for c in sig.checks)
+
+
+def test_daily_drops_unfinished_day():
+    df = synthetic(1500)
+    assert to_daily(df).index[-1] == df.index[-1].floor("1D")       # poslední svíčka 20:00 -> den hotový
+    part = df.iloc[:-2]                                               # den bez 16:00 a 20:00
+    assert to_daily(part).index[-1] == part.index[-1].floor("1D") - pd.Timedelta("1D")
+
+
+def test_breakout_entry_and_stop():
+    idx = pd.date_range("2024-01-01", periods=60 * 6, freq="4h", tz="UTC")
+    close = np.full(len(idx), 100.0)
+    close[-6:] = 110.0                                                 # poslední den průraz nahoru
+    df = pd.DataFrame({"open": close, "high": close + 1, "low": close - 1, "close": close, "volume": 1.0}, index=idx)
+    p = prepare(df, StrategyConfig())
+    sig = entry_signal(p, len(p) - 1, StrategyConfig())
+    assert sig.ok and sig.direction == "long"
+    assert sig.stop == pytest.approx(sig.entry - 2 * p["atr"].iloc[-1])
+
+
+def test_exit_needs_both_close_and_falling_ema():
+    cfg = StrategyConfig()
+    idx = pd.date_range("2024-01-01", periods=3, freq="1D", tz="UTC")
+    p = pd.DataFrame({"close": [99.0, 99.0, 101.0], "ema": [100.0, 100.0, 100.0],
+                      "ema_slope": [-1.0, 1.0, -1.0]}, index=idx)
+    assert exit_signal(p, 0, "long", cfg)[0]                       # pod EMA a EMA klesá
+    assert not exit_signal(p, 1, "long", cfg)[0]                   # pod EMA, ale EMA roste = jen pullback
+    assert not exit_signal(p, 2, "long", cfg)[0]                   # nad EMA
+    assert exit_signal(p, 1, "short", cfg)[0] is False             # short: close pod EMA = drží
 
 
 # --- review (posouzení vlastního nápadu) ---
@@ -114,7 +146,7 @@ def test_simulate_time_exit_short():
 
 @pytest.mark.parametrize("direction", ["long", "short"])
 def test_suggest_levels_order(direction):
-    p = prepare(synthetic(1500), StrategyConfig())
+    p = prepare_4h(synthetic(1500), MarketConfig())
     entry = float(p["close"].iloc[-1])
     lv = suggest_levels(p, direction, entry, ReviewConfig())
     if direction == "long":
@@ -126,9 +158,10 @@ def test_suggest_levels_order(direction):
 
 def test_review_uses_only_finished_history():
     df = synthetic(2500)
-    p = prepare(df, StrategyConfig())
+    p = prepare_4h(df, MarketConfig())
     rv = ReviewConfig(horizon_days=5)
-    res = review(p, "long", 1000, StrategyConfig(), RiskConfig(), rv)
+    sig = entry_signal(prepare(df, StrategyConfig()), -1, StrategyConfig())
+    res = review(p, "long", 1000, MarketConfig(), RiskConfig(), rv, trend_signal=sig)
     assert res.analogs.rows and res.baseline.rows
     assert res.baseline.n <= len(p) - rv.horizon_days * 6
     assert any(row["r"] == res.chosen_r for row in res.analogs.rows)
@@ -204,7 +237,7 @@ def test_zones_skip_broken_levels_and_merge_touches():
 
 
 def test_user_level_blocks_target():
-    p = prepare(synthetic(1500), StrategyConfig())
+    p = prepare_4h(synthetic(1500), MarketConfig())
     entry = float(p["close"].iloc[-1])
     rv = ReviewConfig()
     base = suggest_levels(p, "long", entry, rv)
@@ -222,11 +255,11 @@ def test_edge_indicators_use_only_past():
     funding = pd.Series(np.random.default_rng(3).normal(1e-4, 1e-4, 900),
                         index=pd.date_range("2021-01-01 08:00", periods=900, freq="8h", tz="UTC"))
     btc = df["close"] * 1.1
-    scfg = StrategyConfig()
-    full = compute_indicators(prepare(df, scfg), funding, btc)
+    scfg = MarketConfig()
+    full = compute_indicators(prepare_4h(df, scfg), funding, btc)
     for cut in (1500, 2000, 2400):
         closed = df.index[cut - 1] + pd.Timedelta("4h")      # funding známý při uzavření poslední svíčky
-        part = compute_indicators(prepare(df.iloc[:cut], scfg), funding[funding.index <= closed], btc.iloc[:cut])
+        part = compute_indicators(prepare_4h(df.iloc[:cut], scfg), funding[funding.index <= closed], btc.iloc[:cut])
         pd.testing.assert_frame_equal(part.iloc[-50:], full.iloc[cut - 50:cut])
     assert set(full.columns) == {i.name for i in INDICATORS}
 
@@ -240,7 +273,7 @@ def test_edge_quintiles_from_training_only():
 
 
 def test_edge_outcomes_long_only_known_results():
-    p = prepare(synthetic(1500), StrategyConfig())
+    p = prepare_4h(synthetic(1500), MarketConfig())
     res = outcomes(p, 2.0, 2.0, 30)
     assert res["R"].iloc[-30:].isna().all()          # výsledek ještě není známý
     assert res["R"].dropna().between(-10, 2.0).all()

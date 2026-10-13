@@ -8,29 +8,31 @@ krypto futures – Bybit USDT perpetual. Nástroj NEOBCHODUJE sám a nepoužív�
 API klíče s právem obchodovat. Postup: backtest → paper trading → malé reálné peníze.
 
 ## Rozhodnutí
-- Trh: BTC a ETH (altcoiny zatím ne), Bybit USDT perpetual futures, isolated margin, páka 5×.
+- Trh: BTC, ETH, SOL, HYPE (HYPE má krátkou historii a zatím ~0R), Bybit USDT perpetual futures, isolated margin, páka 5×.
   (`--market spot` jako alternativa.)
 - Účet 267 USDT. Velikost: pevný margin 5 USDT × 5 = pozice 25 USDT. U BTC je minimum burzy
   0,001 BTC (~83 USDT, margin ~17 USDT) – použije se, pokud ztráta na stopu nepřesáhne
   `max_risk_pct` = 1,5 % účtu, jinak se obchod zamítne. Likvidace aspoň 1R za stopem.
-- Strategie: režim trhu (EMA200) → denní trend (EMA50 + sklon) → pullback k EMA20 na 4h
-  → potvrzovací svíčka → RSI filtr → stop za swingem (0,5–3 ATR) → cíl 2R bez rezistence v cestě
-  → časový stop 5 dní.
-- Režim trhu: bull (cena nad rostoucí EMA200) = jen longy, bear = jen shorty, přechod (cena EMA200
-  prorazila, ta ještě neotočila) = oba směry s rizikem ×0,5. Vypnutí: `regime_ema = 0`.
+- Strategie (od 2026-10-13): trend following na DENNÍCH svíčkách. Vstup: close nad/pod 20denním
+  max/min. Stop 2 ATR. Bez pevného cíle – výstup, když close pod EMA20 A EMA20 klesá za 5 dní
+  (short zrcadlově). Režim EMA200: bull = jen longy, bear = jen shorty, přechod = oba směry.
+- Pevné cíle NEPOUŽÍVAT – usekávají velké obchody, na kterých strategie stojí (testy níže).
+- 4h pullback strategie smazána (žádná výhoda). 4h indikátory zůstaly jen jako kontext
+  pro `review` a `edge` (`analyzer/market.py`).
 - Shorty NEVYPÍNAT (`allow_shorts` zůstává True) – v bear marketu jsou potřeba; směr řeší režim trhu.
 - Cílem je indikátor „je tohle dobrý vstup?“ na základě více indikátorů, ne slepý automat.
 - Data vždy až do dneška; split pro kontrolu na posledních 12 měsících (`--split 2025-10-01`),
   aktuální trh má rozhodující slovo.
-- Backtest je záměrně pesimistický: vstup na open další svíčky, stop má přednost před cílem,
-  poplatky + skluz + funding.
+- Backtest je záměrně pesimistický: vstup na open dalšího dne, gap přes stop = open,
+  poplatky + skluz + skutečný funding. Velikost podle rizika (% účtu), nejnižší potřebná páka.
 - Inspirace z Freqtrade: lookahead analýza, protections (cooldown po ztrátách, drawdown halt),
   plus Monte Carlo a out-of-sample split.
 
 ## Struktura
 - `analyzer/config.py` – všechny parametry
 - `analyzer/data.py` – ccxt, cache do `data/`
-- `analyzer/strategy.py` – `prepare()` indikátory, `evaluate()` checklist
+- `analyzer/strategy.py` – denní trend following: `prepare()`, `entry_signal()`, `exit_signal()`
+- `analyzer/market.py` – 4h kontext trhu (trend, režim, EMA20, RSI, ATR) pro `review` a `edge`
 - `analyzer/risk.py` – velikost pozice, páka, likvidace
 - `analyzer/backtest.py` – backtest, `summarize`, `monte_carlo`, `lookahead_check`
 - `analyzer/review.py` – posouzení vlastního nápadu: návrh stopu/cíle, historické analogie
@@ -39,7 +41,7 @@ API klíče s právem obchodovat. Postup: backtest → paper trading → malé r
 - `tests/` – pytest na syntetických datech (offline)
 
 ## Pravidla pro úpravy
-- Po každé změně strategie spustit `pytest -q` a `python -m analyzer lookahead BTC`.
+- Po každé změně strategie spustit `pytest -q` a `python -m analyzer lookahead BTC ETH SOL HYPE`.
 - Hodnotit podle out-of-sample části (`--split`), ne podle celého období; hlídat přeučení.
 - Nový indikátor nejdřív porovnat s náhodným vstupem (podmíněná analýza), až pak do strategie.
 - Žádné indikátory s `shift(-N)` ani agregace přes celý dataframe.
@@ -48,7 +50,7 @@ API klíče s právem obchodovat. Postup: backtest → paper trading → malé r
 - Systémový Python 3.9 (macOS) → `.venv/`; kód musí běžet na 3.9 (`from __future__ import annotations`).
 - Git: https://github.com/TommyShelby21/crypto-analyzator (větev `main`).
 
-## Zjištění (backtest 2021-01 → 2026-10, stav 2026-10-12)
+## Zjištění – stará 4h strategie (smazána 2026-10-13), stav 2026-10-12
 - **Současná pravidla nemají měřitelnou výhodu.** Průměr R záporný na BTC i ETH (posl. 12 měs.
   cca −0,4 až −0,5R). Posledních 12 měsíců byl medvědí trh (BTC 114k → 58k → 83k).
 - Shorty prodělávaly i v bear režimu (−0,5 až −0,7R) → problém není směr, ale vstup.
@@ -80,11 +82,26 @@ Indikátory vybrané podle logiky (proč by měly fungovat), ne podle dat:
   indikátory z ceny a objemu nepředpovídají.
 - Funding na Bybitu: SOL od 2021-06, HYPE od 2024-12; SOL má mezeru ~39 dní a místy 2h intervaly.
 
+## Trend following (denní, stav 2026-10-13)
+Průzkum (skripty mimo repo, pak `analyzer backtest`): vstup průraz 20denního max/min, stop 2 ATR.
+- Výstupy se stejným vstupem (BTC+ETH+SOL+HYPE, průměr R po nákladech):
+  pevný cíl 2R −0,06, 3R −0,03, 5R −0,03, ½ na 2R + trailing −0,09 → pevné cíle ztrátové;
+  kanál 10 dní +0,20, kanál 20 dní +0,43 (táhne SOL), close pod EMA20 +0,19,
+  **close pod EMA20 + EMA20 klesá 5 dní +0,32** (kladné v obou obdobích, BTC/ETH/SOL), trailing 2 ATR +0,11;
+  pojistka „3 ATR od maxima“ vždy zhoršila; stop na vstup po +1R nic nezlepší, prodlouží série ztrát.
+- Pozor: „close pod EMA20“ už znamená klesající EMA za 1 den (matematicky) – proto sklon za 5 dní.
+- Náhodné vstupy se stejnými výstupy: Donchian lepší než 57–92 % náhodných ve všech 8 kombinacích.
+- `analyzer backtest` (1 % riziko, cooldown, skutečný funding, bez režimu): BTC +0,21R (před 0,14 / posl. 0,52),
+  ETH +0,17 (0,12 / 0,37), SOL +0,49 (0,55 / 0,25), HYPE −0,08 (23 obchodů).
+- Režim EMA200: průměr R/obchod vyšší v 6/8 (posl. 12 m.: BTC 0,88, ETH 1,39, SOL 0,72), o ~30 % méně
+  obchodů; součet R před 09/2025 nižší (28,5 vs 37,8), posl. 12 m. vyšší (16,4 vs 11,0) → zapnuto.
+- Jen longy: skvělé v bull 2021–2025, v posl. 12 m. (bear) BTC −0,26, ETH −0,41 → shorty potřeba.
+- Pevná páka 5× u širokých stopů (SOL/HYPE 10–15 %) dá likvidaci před stopem → obchod se zamítne;
+  backtest proto počítá s nejnižší potřebnou pákou.
+
 ## Další krok
-1. Funding jako varování v `review`/`check` (přeplněná strana) – jediný kandidát s logikou i daty.
-2. Další hypotézy s logikou: open interest (růst OI + pokles ceny), delší horizont držení
-   (momentum v literatuře funguje spíš na týdny), likvidace. Vždy nejdřív `edge`, pak strategie.
-3. Snížit náklady: vstup limitním příkazem (maker 0,02 %, bez skluzu).
-4. Pokud se nic nenajde: používat nástroj hlavně na řízení rizika (stop, velikost, likvidace),
-   ne na předpověď směru.
-Nápady na později: Telegram upozornění, vyhodnocení deníku (`journal.csv`), více timeframů.
+1. Paper trading: `check` jednou denně po 00:00 UTC, zapisovat do deníku, po 2–3 měsících porovnat s backtestem.
+2. Funding jako varování v `check` (přeplněná strana) – jediný kandidát z `edge` s logikou i daty.
+3. Portfolio: víc coinů najednou = víc obchodů a hladší výsledky; řešit celkové riziko.
+4. Snížit náklady: vstup limitním příkazem (maker 0,02 %, bez skluzu).
+Nápady na později: Telegram upozornění (výstupní signál!), vyhodnocení deníku (`journal.csv`).

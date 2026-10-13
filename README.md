@@ -9,20 +9,20 @@ pravidla a spočítá velikost pozice.
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-pytest -q              # 7 testů, běží offline
+pytest -q              # testy běží offline
 ```
 
 ## Použití
 
 ```bash
 # 1) Nejdřív ověř, že pravidla mají na historii kladné očekávání
-python -m analyzer backtest BTC ETH --equity 1000 --since 2021-01-01 --split 2024-06-01
+python -m analyzer backtest BTC ETH SOL --equity 1000 --split 2025-10-01
 
 # 2) Kontrola, že strategie nenahlíží do budoucnosti (po každé úpravě pravidel)
-python -m analyzer lookahead BTC
+python -m analyzer lookahead BTC ETH
 
-# 3) Denní/4h kontrola: mám vstoupit?
-python -m analyzer check BTC ETH
+# 3) Jednou denně po 00:00 UTC: vstoupit? a mám otevřenou pozici držet, nebo zavřít?
+python -m analyzer check BTC ETH SOL
 
 # 4) Mám vlastní nápad („long BTC na týden“) – posuď ho
 python -m analyzer review BTC long --days 7
@@ -39,20 +39,24 @@ body pro a proti. Parametry jsou v `ReviewConfig` v `analyzer/config.py`.
 Užitečné přepínače: `--market perp|spot` (výchozí perp), `--margin-usdt 5` (vlastní peníze do pozice, pozice = margin × páka), `--leverage 5`, `--risk-usdt 5` nebo `--risk 1` (velikost podle ztráty na stopu místo marginu), `--equity` (výchozí 267), `--long-only`. U `review` navíc `--entry 82250` (limitní vstup) a `--levels 82000,87000` (tvoje úrovně z grafu – nástroj je použije pro stop i cíl).
 Všechna pravidla a parametry jsou v `analyzer/config.py`.
 
-## Strategie (výchozí)
+## Strategie: trend following na denních svíčkách
 
-1. **Denní trend:** cena nad EMA50 a EMA50 roste (short obráceně). Bere se jen uzavřený den.
-2. **Pullback na 4h** k EMA20 během posledních 3 svíček a close zpět nad EMA20.
-3. **Potvrzovací svíčka:** býčí a uzavře nad high předchozí svíčky.
-4. **RSI** v pásmu 40–70 (short 30–60).
-5. **Stop** pod swingovým minimem z 10 svíček; musí být 0,5–3 ATR daleko.
-6. **Cíl 2R**, obchod se zamítne, když mezi vstupem a cílem leží rezistence.
-7. **Časový stop** 5 dní.
+1. **Vstup:** denní close nad 20denním maximem → long; pod 20denním minimem → short.
+2. **Režim trhu:** bull (close nad rostoucí EMA200) = jen longy, bear = jen shorty, přechod = oba směry.
+3. **Stop:** 2 ATR od vstupu – pojistka, když průraz hned selže. Zadej ho na burze se vstupem.
+4. **Bez pevného cíle.** Zavírá se, až se otočí trend: **close pod EMA20 a zároveň EMA20 klesá
+   za posledních 5 dní** (short obráceně). Samotný close pod EMA20 bývá jen pullback v trendu.
+
+Proč takhle (backtest 2021–2026, BTC/ETH/SOL/HYPE): pevné cíle 2R/3R/5R vycházely ztrátově,
+protože usekávají pár velkých obchodů (+10 až +46R), na kterých strategie stojí. Vyhrává jen
+~35–40 % obchodů a od vrcholu se v průměru vrátí ~2R – to je cena za to, že vrchol nikdo nezná.
+4h pullback strategie (EMA20, RSI, potvrzovací svíčka) neměla měřitelnou výhodu a byla smazána.
 
 ## Řízení rizika
 
-- Velikost pozice = 1 % účtu / vzdálenost ke stopu (včetně poplatků a skluzu).
-- Páka se volí co nejnižší, strop 3×; likvidace musí být aspoň 1R za stopem.
+- `check`/`review`: pevný margin 5 USDT × páka 5× (nastavení v `RiskConfig`), nebo `--risk 1` (% účtu).
+- `backtest`: velikost podle rizika (`--risk`, výchozí 1 % účtu) a nejnižší potřebná páka.
+- Likvidace musí být aspoň 1R za stopem – u širokých stopů (SOL, HYPE) sniž páku.
 - Isolated margin.
 
 ## Co si vzal z open-source nástrojů
@@ -69,7 +73,9 @@ Všechna pravidla a parametry jsou v `analyzer/config.py`.
   to po realitě (horší plnění, chyby, emoce) nejspíš nebude vydělávat.
 - Méně než ~50 obchodů = výsledek je skoro náhoda.
 - Když výsledky výrazně zlepšíš laděním parametrů, ale out-of-sample se zhorší, je to přeučení.
-- Backtest je záměrně pesimistický (stop má přednost před cílem ve stejné svíčce).
+- Backtest je záměrně pesimistický: vstup na open dalšího dne, gap přes stop = horší cena,
+  poplatky + skluz + skutečný funding.
+- Série 5–8 ztrát po sobě je u trend followingu normální.
 
 ## Deník
 

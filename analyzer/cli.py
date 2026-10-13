@@ -1,7 +1,7 @@
 """Příkazová řádka.
 
-  python -m analyzer check BTC ETH --equity 800
-  python -m analyzer backtest BTC --since 2021-01-01 --split 2024-06-01
+  python -m analyzer check BTC ETH SOL
+  python -m analyzer backtest BTC ETH --since 2021-01-01 --split 2025-10-01
   python -m analyzer lookahead BTC
   python -m analyzer review BTC long --days 7 --equity 800
   python -m analyzer edge BTC ETH SOL HYPE --split 2025-10-01
@@ -18,12 +18,13 @@ import numpy as np
 import pandas as pd
 
 from .backtest import lookahead_check, monte_carlo, run_backtest, summarize, trades_to_frame
-from .config import ReviewConfig, RiskConfig, StrategyConfig
+from .config import MarketConfig, ReviewConfig, RiskConfig, StrategyConfig
 from .data import fetch_funding, fetch_market_limits, fetch_ohlcv
 from .edge import INDICATORS, compute_indicators, outcomes, quintiles, table, verdict
 from .review import review
+from .market import prepare_4h
 from .risk import plan_position
-from .strategy import evaluate, prepare
+from .strategy import entry_signal, exit_signal, prepare
 
 ROOT = Path(__file__).resolve().parent.parent
 JOURNAL = ROOT / "journal.csv"
@@ -52,7 +53,7 @@ def _journal(candle, sym, decision, direction, plan, failed):
                         "failed_checks", "taken", "result_r", "note"])
         w.writerow([datetime.now(timezone.utc).isoformat(timespec="minutes"), candle, sym, decision,
                     direction or "", plan and round(plan.entry, 2), plan and round(plan.stop, 2),
-                    plan and round(plan.target, 2), failed, "", "", ""])
+                    plan and plan.target and round(plan.target, 2), failed, "", "", ""])
 
 
 def _print_plan(plan, sym: str, equity: float, rcfg, days: int | None = None, hold: float = 0.0):
@@ -67,8 +68,8 @@ def _print_plan(plan, sym: str, equity: float, rcfg, days: int | None = None, ho
         liq = f"likvidace ~{_num(plan.liq_price)}"
     print(f"  Pozice {qty} {coin} ({_num(plan.notional)} USDT), vlastní peníze {_num(plan.margin)} USDT"
           + (f", půjčka {_num(plan.borrowed)} USDT" if plan.borrowed else "") + f", {liq}")
-    print(f"  Ztráta na stopu {_num(plan.risk_usdt)} USDT ({plan.risk_usdt / equity * 100:.2f} % účtu), "
-          f"zisk na cíli {_num(plan.reward_usdt)} USDT (čisté R:R {plan.rr_net:.2f})")
+    print(f"  Ztráta na stopu {_num(plan.risk_usdt)} USDT ({plan.risk_usdt / equity * 100:.2f} % účtu)"
+          + (f", zisk na cíli {_num(plan.reward_usdt)} USDT (čisté R:R {plan.rr_net:.2f})" if plan.target else ""))
     if plan.market == "spot":
         if plan.direction == "long":
             how = f"Spot: kup {qty} {coin} za ~{_num(plan.notional)} USDT"
@@ -88,35 +89,43 @@ def _print_plan(plan, sym: str, equity: float, rcfg, days: int | None = None, ho
 
 
 def cmd_check(args, scfg, rcfg):
-    since = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=400)).strftime("%Y-%m-%d")
+    since = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=max(400, scfg.regime_ema * 2))).strftime("%Y-%m-%d")
     for raw in args.symbols:
         sym = _symbol(raw)
         df = fetch_ohlcv(sym, "4h", since=since, use_cache=False)
         p = prepare(df, scfg)
-        sig = evaluate(p, len(p) - 1, scfg)
-        print(f"\n{sym} – 4h – svíčka uzavřená {sig.time + pd.Timedelta('4h'):%Y-%m-%d %H:%M} UTC")
+        i = len(p) - 1
+        sig = entry_signal(p, i, scfg)
+        print(f"\n{sym} – denní svíčka {sig.time:%Y-%m-%d} (uzavřená {sig.time + pd.Timedelta('1D'):%Y-%m-%d} 00:00 UTC)")
         for c in sig.checks:
             print(f"  {'✅' if c.passed else '❌'} {c.name}: {c.detail}")
 
-        decision = "VSTUP" if sig.ok else ("ČEKAT" if sig.direction else "NIC")
+        decision = "VSTUP" if sig.ok else "NIC"
         plan = None
         if sig.direction:
-            plan = plan_position(args.equity, sig.direction, sig.entry, sig.stop, sig.target, rcfg,
-                                 sig.risk_mult or 1.0, **_limits(sym, rcfg))
+            plan = plan_position(args.equity, sig.direction, sig.entry, sig.stop, None, rcfg,
+                                 sig.risk_mult, **_limits(sym, rcfg))
             if sig.ok and not plan.ok:
-                decision = "ČEKAT"
+                decision = "NIC (pozice nevychází)"
         print(f"  → {decision}" + (f" ({sig.direction.upper()})" if sig.direction else ""))
-
         if plan:
-            label = "Plán" if sig.ok else "Pokud se setup dokončí"
-            print(f"  {label}: vstup ~{_num(plan.entry)} | SL {_num(plan.stop)} | TP {_num(plan.target)}")
+            print(f"  Plán: vstup ~{_num(plan.entry)} | stop {_num(plan.stop)} | cíl žádný – drž, dokud "
+                  f"check neřekne ZAVŘÍT")
             _print_plan(plan, sym, args.equity, rcfg)
             for w in plan.warnings:
                 print(f"  ⚠️  {w}")
 
+        print("  Máš otevřenou pozici?")
+        for d in ("long", "short") if scfg.allow_shorts else ("long",):
+            close, checks = exit_signal(p, i, d, scfg)
+            why = ", ".join(f"{'✅' if c.passed else '❌'} {c.name} ({c.detail})" for c in checks)
+            print(f"    {d.upper():<5} → {'ZAVŘÍT' if close else 'DRŽET'}: {why}")
+
         _journal(sig.time, sym, decision, sig.direction, plan,
                  "; ".join(c.name for c in sig.checks if not c.passed))
-    print(f"\nZapsáno do {JOURNAL.name} – doplň sloupce taken / result_r / note, až obchod uzavřeš.")
+    print(f"\nStop je pojistka pro případ, že průraz hned selže – zadej ho na burze se vstupem. "
+          f"Výstup řeší ZAVŘÍT výše (kontroluj jednou denně po 00:00 UTC).")
+    print(f"Zapsáno do {JOURNAL.name} – doplň sloupce taken / result_r / note, až obchod uzavřeš.")
 
 
 ICON = {"ok": "✅", "warn": "⚠️ ", "bad": "❌"}
@@ -134,14 +143,17 @@ def cmd_review(args, scfg, rcfg):
     except Exception as e:
         print(f"(funding se nepodařilo stáhnout: {e}; použiju {rcfg.default_funding_rate:.4%}/8h)")
         funding_rate = None
-    rv_ = review(prepare(df, scfg), args.direction, args.equity, scfg, rcfg, rv, funding_rate, args.entry,
-                 _limits(sym, rcfg), args.levels)
+    mcfg = MarketConfig()
+    daily = prepare(df, scfg)
+    trend_sig = entry_signal(daily, len(daily) - 1, scfg)
+    rv_ = review(prepare_4h(df, mcfg), args.direction, args.equity, mcfg, rcfg, rv, funding_rate, args.entry,
+                 _limits(sym, rcfg), args.levels, trend_sig)
     lv, a, e = rv_.levels, rv_.atr, rv_.entry
 
     print(f"\n{sym} – {args.direction.upper()} na {rv.horizon_days} dní – "
           f"svíčka uzavřená {rv_.time + pd.Timedelta('4h'):%Y-%m-%d %H:%M} UTC")
     print(f"  Trh: denní trend {rv_.trend}, režim {rv_.regime or '–'}, RSI {rv_.rsi:.0f}, "
-          f"ATR(4h) {_num(a)} ({a / e * 100:.1f} %), EMA{scfg.pullback_ema} 4h {_num(rv_.ema_pull)}, "
+          f"ATR(4h) {_num(a)} ({a / e * 100:.1f} %), EMA{mcfg.fast_ema} 4h {_num(rv_.ema_fast)}, "
           f"funding {rv_.funding_rate:.4%}/8h")
 
     print("\n  Návrh")
@@ -186,6 +198,13 @@ def _print_stats(title, stats):
 
 
 def cmd_backtest(args, scfg, rcfg):
+    # pevný margin/riziko by výsledky v % nedávaly srovnatelné; pevná páka 5× by u širokých stopů
+    # (SOL, HYPE: 2 ATR = 10–15 %) dala likvidaci před stop a obchod by se zamítl -> nejnižší potřebná páka
+    rcfg.margin_usdt, rcfg.risk_usdt = 0, 0
+    if args.leverage is None:
+        rcfg.leverage = 0
+    print(f"Velikost pozice podle rizika {rcfg.risk_pct:g} % účtu na obchod (--risk), účet {args.equity:g} USDT, "
+          f"páka {'nejnižší potřebná' if not rcfg.leverage else f'{rcfg.leverage:g}×'}.")
     for raw in args.symbols:
         sym = _symbol(raw)
         print(f"\nStahuji {sym} od {args.since} …")
@@ -253,7 +272,7 @@ def cmd_edge(args, scfg, rcfg):
 
     frames = []
     for sym, (df, funding) in data.items():
-        p = prepare(df, scfg)
+        p = prepare_4h(df, MarketConfig())
         ind = compute_indicators(p, funding, None if sym.startswith("BTC/") else btc_close)
         res = outcomes(p, args.stop_atr, args.target, horizon)
         f = pd.concat([ind, res], axis=1).dropna(subset=["R"])

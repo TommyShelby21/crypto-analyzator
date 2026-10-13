@@ -4,35 +4,37 @@ from dataclasses import dataclass
 
 @dataclass
 class StrategyConfig:
-    # --- trend (denní graf) ---
-    trend_ema: int = 50              # cena musí být nad/pod touto EMA
-    trend_slope_days: int = 5        # EMA musí růst/klesat za posledních N dní
+    """Trend following na denních svíčkách (otestováno 2021–2026 na BTC, ETH, SOL, HYPE).
 
-    # --- režim trhu (pomalejší filtr nad denním trendem) ---
-    # bull = cena nad rostoucí EMA -> jen longy; bear = cena pod klesající EMA -> jen shorty;
-    # přechod = cena už EMA prorazila, ale ta ještě neotočila -> oba směry se sníženým rizikem
-    regime_ema: int = 200            # 0 = režim vypnutý
-    regime_slope_days: int = 10      # sklon EMA za posledních N dní
-    regime_transition_risk: float = 0.5  # násobek rizika v přechodu (0 = v přechodu neobchodovat)
-
-    # --- vstup (4h graf) ---
-    pullback_ema: int = 20           # pullback k této EMA
-    pullback_tolerance: float = 0.005  # low/high se musí přiblížit k EMA na 0,5 %
-    pullback_lookback: int = 3       # pullback v posledních N svíčkách
-    rsi_period: int = 14
-    rsi_long_range: tuple = (40, 70)   # long jen když RSI v tomto pásmu
-    rsi_short_range: tuple = (30, 60)
+    Vstup: denní close prorazí N-denní maximum (long) / minimum (short).
+    Stop: stop_atr × ATR od vstupu – pro případ, že průraz hned selže.
+    Výstup: žádný pevný cíl (pevné cíle vycházely ztrátově – usekávají velké pohyby).
+    Zavírá se, až se otočí trend: close pod EMA20 A ZÁROVEŇ EMA20 klesá za posledních N dní.
+    """
+    entry_days: int = 20             # průraz N-denního maxima/minima
+    atr_days: int = 20
+    stop_atr: float = 2.0            # počáteční stop
+    exit_ema: int = 20               # výstup: close pod/nad touto EMA...
+    exit_slope_days: int = 5         # ...a EMA klesá/roste za posledních N dní
     allow_shorts: bool = True
+    # režim trhu: bull (close nad rostoucí EMA200) = jen longy, bear = jen shorty, přechod = oba směry.
+    # Test 2021-08 → 2026-10: průměr R na obchod vyšší v 6/8 (coin × období), obchodů o ~30 % méně.
+    regime_ema: int = 200            # 0 = vypnuto
+    regime_slope_days: int = 10
 
-    # --- stop-loss a cíl ---
+
+@dataclass
+class MarketConfig:
+    """Kontext trhu na 4h svíčkách pro `review` a `edge` (trend, režim, RSI, ATR)."""
+    trend_ema: int = 50              # denní trend: cena nad/pod touto EMA...
+    trend_slope_days: int = 5        # ...a EMA roste/klesá za posledních N dní
+    # bull = cena nad rostoucí EMA200, bear = pod klesající, přechod = cena už prorazila, EMA ještě neotočila
+    regime_ema: int = 200            # 0 = režim vypnutý
+    regime_slope_days: int = 10
+    regime_transition_risk: float = 0.5  # násobek rizika v přechodu (0 = v přechodu neobchodovat)
+    fast_ema: int = 20               # EMA na 4h
+    rsi_period: int = 14
     atr_period: int = 14
-    swing_lookback: int = 10         # swingové minimum/maximum z posledních N svíček
-    stop_buffer_atr: float = 0.2     # stop kousek za swing (v ATR)
-    min_stop_atr: float = 0.5        # příliš těsný stop = šum -> obchod zamítnout
-    max_stop_atr: float = 3.0        # příliš široký stop -> obchod zamítnout
-    target_r: float = 2.0            # cíl v násobcích rizika
-    resistance_lookback: int = 50    # rezistence/support z posledních N svíček
-    max_hold_bars: int = 30          # časový stop (30 × 4h = 5 dní)
 
 
 @dataclass
@@ -80,5 +82,5 @@ class RiskConfig:
 
     # --- ochrany (inspirováno "protections" ve Freqtrade) ---
     cooldown_after_losses: int = 3   # po N ztrátách v řadě pauza...
-    cooldown_bars: int = 12          # ...na N svíček (12 × 4h = 2 dny)
+    cooldown_days: int = 2           # ...na N dní
     max_drawdown_halt_pct: float = 25.0  # při propadu o X % od maxima přestat obchodovat

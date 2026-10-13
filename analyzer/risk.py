@@ -20,14 +20,14 @@ class PositionPlan:
     direction: str
     entry: float
     stop: float
-    target: float
+    target: float | None      # None = bez pevného cíle (trend following)
     qty: float
     notional: float
     leverage: float
     margin: float             # vlastní peníze vázané v pozici
     liq_price: float          # 0 = likvidace nehrozí
     risk_usdt: float          # ztráta při stopu včetně poplatků a skluzu
-    reward_usdt: float        # zisk při cíli po poplatcích a skluzu
+    reward_usdt: float        # zisk při cíli po poplatcích a skluzu (0 bez cíle)
     market: str = "perp"
     borrowed: float = 0.0     # půjčená hodnota v USDT (spot margin)
     warnings: list = field(default_factory=list)
@@ -49,18 +49,18 @@ def fee_rate(cfg: RiskConfig) -> float:
     return cfg.spot_taker_fee if cfg.market == "spot" else cfg.taker_fee
 
 
-def plan_position(equity: float, direction: str, entry: float, stop: float, target: float,
+def plan_position(equity: float, direction: str, entry: float, stop: float, target: float | None,
                   cfg: RiskConfig, risk_mult: float = 1.0, qty_step: float | None = None,
                   min_qty: float | None = None, min_cost: float | None = None) -> PositionPlan:
-    if direction == "long" and not stop < entry < target:
+    if direction == "long" and not (stop < entry and (target is None or entry < target)):
         raise ValueError("Long: musí platit stop < vstup < cíl")
-    if direction == "short" and not target < entry < stop:
+    if direction == "short" and not (entry < stop and (target is None or target < entry)):
         raise ValueError("Short: musí platit cíl < vstup < stop")
 
     spot = cfg.market == "spot"
     cost = fee_rate(cfg) + cfg.slippage          # na každou stranu obchodu
     loss_per_unit = abs(entry - stop) + cost * (entry + stop)
-    gain_per_unit = abs(target - entry) - cost * (entry + target)
+    gain_per_unit = abs(target - entry) - cost * (entry + target) if target is not None else 0.0
     warnings = []
     leverage = min(cfg.leverage or 1.0, cfg.max_leverage)
 
@@ -123,7 +123,7 @@ def plan_position(equity: float, direction: str, entry: float, stop: float, targ
     if liq and ((direction == "long" and liq > stop - buffer) or (direction == "short" and liq < stop + buffer)):
         ok = False
         warnings.append("Likvidační cena je příliš blízko stopu – sniž páku.")
-    if gain_per_unit <= 0:
+    if target is not None and gain_per_unit <= 0:
         ok = False
         warnings.append("Po poplatcích a skluzu obchod nedává zisk ani při dosažení cíle.")
 
