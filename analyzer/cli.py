@@ -5,6 +5,8 @@
   python -m analyzer lookahead BTC
   python -m analyzer review BTC long --days 7 --equity 800
 """
+from __future__ import annotations
+
 import argparse
 import csv
 import sys

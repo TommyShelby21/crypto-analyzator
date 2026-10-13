@@ -7,6 +7,8 @@ Dva způsoby, jak určit velikost:
 Spot long do velikosti účtu se platí vlastními penězi – nic se nepůjčuje,
 takže nehrozí likvidace ani úrok. Spot short = půjčené BTC/ETH, platí se úrok.
 """
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 import math
 
