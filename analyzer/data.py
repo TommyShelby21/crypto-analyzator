@@ -74,6 +74,17 @@ def fetch_ohlcv(symbol: str = "BTC/USDT:USDT", timeframe: str = "4h",
     return df[df.index >= pd.Timestamp(since, tz="UTC")]
 
 
+def _funding_batch(ex, symbol: str, cursor: int) -> list:
+    """Bybit vrací prázdno, když `since` leží před vznikem trhu (SOL, HYPE) – posouvá se po oknech."""
+    now_ms = ex.milliseconds()
+    while cursor < now_ms:
+        batch = ex.fetch_funding_rate_history(symbol, since=cursor, limit=200)
+        if batch:
+            return batch
+        cursor += 200 * 8 * 3_600_000
+    return []
+
+
 def fetch_funding(symbol: str = "BTC/USDT:USDT", since: str = "2021-01-01",
                   use_cache: bool = True) -> pd.Series:
     """Historie funding rate (sazba za 8h interval), index = čas vyúčtování."""
@@ -81,29 +92,39 @@ def fetch_funding(symbol: str = "BTC/USDT:USDT", since: str = "2021-01-01",
     path = _cache_path("funding", symbol)
     since_ms = int(pd.Timestamp(since, tz="UTC").timestamp() * 1000)
 
+    ex = _exchange()
     cached = None
     if use_cache and path.exists():
         cached = pd.read_csv(path, index_col=0, parse_dates=True)["rate"]
-        if cached.index.tz is None:
+        if cached.empty:
+            cached.index = pd.DatetimeIndex([], tz="UTC")
+        elif cached.index.tz is None:
             cached.index = cached.index.tz_localize("UTC")
-        if len(cached) and cached.index[0] <= pd.Timestamp(since, tz="UTC") + pd.Timedelta("1D"):
+        first_ms = int(cached.index[0].timestamp() * 1000) if len(cached) else None
+        # trh mohl začít až po `since` – cache platí, když burza před první uloženou hodnotou nic nemá
+        valid = first_ms is not None and (
+            first_ms <= since_ms + 86_400_000 or
+            (_funding_batch(ex, symbol, since_ms) or [{"timestamp": first_ms}])[0]["timestamp"] >= first_ms)
+        if valid:
             since_ms = int(cached.index[-1].timestamp() * 1000) + 1
         else:
             cached = None
 
-    ex = _exchange()
     rows, cursor = [], since_ms
     while True:
-        batch = ex.fetch_funding_rate_history(symbol, since=cursor, limit=200)
+        batch = _funding_batch(ex, symbol, cursor)
         if not batch:
             break
         rows.extend((b["timestamp"], b["fundingRate"]) for b in batch)
         nxt = batch[-1]["timestamp"] + 1
-        if nxt <= cursor or len(batch) < 200:
+        # kratší dávka neznamená konec – u nového trhu začíná data uprostřed okna
+        if nxt <= cursor or nxt > ex.milliseconds() - 8 * 3_600_000:
             break
         cursor = nxt
 
     new = pd.Series({pd.Timestamp(t, unit="ms", tz="UTC"): r for t, r in rows}, name="rate", dtype=float)
+    if new.empty:
+        new.index = pd.DatetimeIndex([], tz="UTC")
     s = pd.concat([cached, new]) if cached is not None else new
     s = s[~s.index.duplicated(keep="last")].sort_index()
     s.rename("rate").to_frame().to_csv(path)

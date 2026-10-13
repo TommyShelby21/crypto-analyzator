@@ -26,6 +26,9 @@ python -m analyzer check BTC ETH
 
 # 4) Mám vlastní nápad („long BTC na týden“) – posuď ho
 python -m analyzer review BTC long --days 7
+
+# 5) Předpovídá indikátor něco? (vs. náhodný vstup, hranice skupin jen z dat před --split)
+python -m analyzer edge BTC ETH SOL HYPE --split 2025-10-01
 ```
 
 `review` sám navrhne stop (za nejbližší swing 1–4 ATR od ceny) a cíl (2R, nebo těsně

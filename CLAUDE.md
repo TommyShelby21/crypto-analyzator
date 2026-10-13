@@ -34,7 +34,8 @@ API klíče s právem obchodovat. Postup: backtest → paper trading → malé r
 - `analyzer/risk.py` – velikost pozice, páka, likvidace
 - `analyzer/backtest.py` – backtest, `summarize`, `monte_carlo`, `lookahead_check`
 - `analyzer/review.py` – posouzení vlastního nápadu: návrh stopu/cíle, historické analogie
-- `analyzer/cli.py` – příkazy `check`, `backtest`, `lookahead`, `review`
+- `analyzer/edge.py` – test indikátorů proti náhodnému vstupu (kvintily, hranice jen z dat před splitem)
+- `analyzer/cli.py` – příkazy `check`, `backtest`, `lookahead`, `review`, `edge`
 - `tests/` – pytest na syntetických datech (offline)
 
 ## Pravidla pro úpravy
@@ -63,10 +64,27 @@ API klíče s právem obchodovat. Postup: backtest → paper trading → malé r
   - close nad/pod EMA20 slabě pomáhá; RSI, stop ATR, potvrzovací svíčka ~nic; „volná cesta“ spíš škodí,
   - skóre (počet splněných podmínek) s výsledkem neroste → skóre z těchto indikátorů nefunguje.
 
+- `review` – „podobné situace v historii“ vychází vždy ~0R. Není to chyba (na umělých datech s trendem
+  ukáže +0,5 až +1,2R), ale podobnost se hledá podle trendu/režimu/RSI, které nic nepředpovídají.
+
+## Test indikátorů (`python -m analyzer edge BTC ETH SOL HYPE`, stav 2026-10-13)
+Long z každé 4h svíčky, stop 2 ATR, cíl 2R, max 5 dní, bez nákladů. Kvintily z dat před 2025-10-01.
+Indikátory vybrané podle logiky (proč by měly fungovat), ne podle dat:
+- ❌ momentum 20d/60d, pozice v 20denním kanálu, vzdálenost od EMA20, stlačená volatilita, objem,
+  síla vs. BTC – žádný nemá konzistentní směr napříč coiny a obdobími (šum).
+- ⚠️ funding 3d – jediný s konzistentním směrem: vysoký funding = horší long (kontrariánský,
+  odpovídá logice přeplněných longů), medián −0,14R, ale statisticky slabé (1/6 významných).
+- Rozdělení podle režimu: momentum v bull trhu spíš +, v bear spíš − (koupě síly v bull, prodej
+  odrazů v bear), ale rozdíly malé (medián ±0,1R) a vzorky malé. Funding − v bull i bear.
+- Náhodný vstup bez nákladů ≈ 0R ve všech obdobích → BTC/ETH/SOL/HYPE na 4h/5 dní jednoduché
+  indikátory z ceny a objemu nepředpovídají.
+- Funding na Bybitu: SOL od 2021-06, HYPE od 2024-12; SOL má mezeru ~39 dní a místy 2h intervaly.
+
 ## Další krok
-1. Z podmíněné analýzy udělat příkaz `python -m analyzer edge BTC ETH` (každá podmínka:
-   průměr R když platí / neplatí / všechny kromě této, srovnání s náhodným vstupem).
-2. Testovat nové hypotézy místo ladění starých: momentum/breakout, extrémy funding rate
-   (data už jsou v `data/`).
+1. Funding jako varování v `review`/`check` (přeplněná strana) – jediný kandidát s logikou i daty.
+2. Další hypotézy s logikou: open interest (růst OI + pokles ceny), delší horizont držení
+   (momentum v literatuře funguje spíš na týdny), likvidace. Vždy nejdřív `edge`, pak strategie.
 3. Snížit náklady: vstup limitním příkazem (maker 0,02 %, bez skluzu).
+4. Pokud se nic nenajde: používat nástroj hlavně na řízení rizika (stop, velikost, likvidace),
+   ne na předpověď směru.
 Nápady na později: Telegram upozornění, vyhodnocení deníku (`journal.csv`), více timeframů.

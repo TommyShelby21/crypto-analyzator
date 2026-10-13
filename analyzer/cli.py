@@ -4,6 +4,7 @@
   python -m analyzer backtest BTC --since 2021-01-01 --split 2024-06-01
   python -m analyzer lookahead BTC
   python -m analyzer review BTC long --days 7 --equity 800
+  python -m analyzer edge BTC ETH SOL HYPE --split 2025-10-01
 """
 from __future__ import annotations
 
@@ -13,11 +14,13 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from .backtest import lookahead_check, monte_carlo, run_backtest, summarize, trades_to_frame
 from .config import ReviewConfig, RiskConfig, StrategyConfig
 from .data import fetch_funding, fetch_market_limits, fetch_ohlcv
+from .edge import INDICATORS, compute_indicators, outcomes, quintiles, table, verdict
 from .review import review
 from .risk import plan_position
 from .strategy import evaluate, prepare
@@ -229,6 +232,73 @@ def cmd_lookahead(args, scfg, rcfg):
             print(f"{sym}: ✅ bez lookahead biasu ({args.samples} náhodných svíček)")
 
 
+def cmd_edge(args, scfg, rcfg):
+    split = pd.Timestamp(args.split, tz="UTC")
+    horizon = args.days * 6
+    btc_close, data = None, {}
+    for raw in args.symbols:
+        sym = _symbol(raw)
+        print(f"Stahuji {sym} …", flush=True)
+        df = fetch_ohlcv(sym, "4h", since=args.since)
+        try:
+            funding = fetch_funding(sym, since=args.since)
+        except Exception as e:
+            print(f"  (funding se nepodařilo stáhnout: {e})")
+            funding = None
+        if sym.startswith("BTC/") and btc_close is None:
+            btc_close = df["close"]
+        data[sym] = (df, funding)
+    if btc_close is None and any(not s.startswith("BTC/") for s in data):
+        btc_close = fetch_ohlcv("BTC/USDT:USDT", "4h", since=args.since)["close"]
+
+    frames = []
+    for sym, (df, funding) in data.items():
+        p = prepare(df, scfg)
+        ind = compute_indicators(p, funding, None if sym.startswith("BTC/") else btc_close)
+        res = outcomes(p, args.stop_atr, args.target, horizon)
+        f = pd.concat([ind, res], axis=1).dropna(subset=["R"])
+        f["sym"] = sym.split("/")[0]
+        f["per"] = np.where(f.index < split, "před", "posl.")
+        frames.append(f)
+    allf = pd.concat(frames)
+    base = allf.groupby(["sym", "per"])["R"].mean().unstack("per")
+
+    print(f"\nLong ze každé 4h svíčky: stop {args.stop_atr:g} ATR, cíl {args.target:g}R, max {args.days} dní, "
+          f"bez nákladů (ty ubírají ~0,1R).")
+    print(f"„před“ = do {args.split} (z toho jsou hranice skupin), „posl.“ = od {args.split} (kontrola).")
+    print("Náhodný vstup (průměr R):", "  ".join(f"{s} {r['před']:+.2f} / {r.get('posl.', np.nan):+.2f}"
+                                             for s, r in base.iterrows()))
+    print("Q1 = nejnižší 20 % hodnot indikátoru, Q5 = nejvyšší 20 %. Short je zrcadlo: −R minus náklady.")
+
+    summary = []
+    for ind in INDICATORS:
+        rows = []
+        for f in frames:
+            if f[ind.name].notna().sum() == 0:
+                continue
+            g = f[["sym", "per", "R", "move_pct"]].copy()
+            g["q"] = quintiles(f, ind.name, split)
+            rows.append(g.dropna(subset=["q"]))
+        if not rows:
+            continue
+        rows = pd.concat(rows)
+        piv = table(rows, horizon)
+        mark, txt = verdict(piv)
+        summary.append((mark, ind.name, txt))
+        print(f"\n── {ind.name}: {ind.desc}")
+        print(f"   proč: {ind.logic}")
+        print(f"   {'':<12}{'Q1':>7}{'Q2':>7}{'Q3':>7}{'Q4':>7}{'Q5':>7}{'Q5−Q1':>9}{'±2SE':>7}   pohyb % Q1→Q5")
+        for (sym, per), r in piv.iterrows():
+            qs = "".join(f"{r.get(q, np.nan):>+7.2f}" for q in (1.0, 2.0, 3.0, 4.0, 5.0))
+            print(f"   {sym + ' ' + per:<12}{qs}{r['Q5−Q1']:>+9.2f}{r['±2SE']:>7.2f}"
+                  f"   {r['move_Q1']:.1f} → {r['move_Q5']:.1f}")
+        print(f"   {mark} {txt}")
+
+    print("\n══ Shrnutí (✅ = stejný směr všude a medián ≥ 0,15R; ⚠️ = skoro; ❌ = šum)")
+    for mark, name, txt in sorted(summary, key=lambda x: "✅⚠️❌–".index(x[0][0])):
+        print(f"  {mark} {name:<14} {txt}")
+
+
 def main(argv=None):
     if hasattr(sys.stdout, "reconfigure"):  # Windows konzole (cp1250) neumí emoji
         sys.stdout.reconfigure(encoding="utf-8")
@@ -275,6 +345,16 @@ def main(argv=None):
     sp.add_argument("--since", default="2021-01-01", help="od kdy brát historii pro srovnání")
     risk_args(sp)
     sp.set_defaults(func=cmd_review)
+
+    sp = sub.add_parser("edge", help="otestuje, jestli indikátory něco předpovídají (vs. náhodný vstup)")
+    sp.add_argument("symbols", nargs="+", help="např. BTC ETH SOL HYPE")
+    sp.add_argument("--since", default="2021-01-01")
+    sp.add_argument("--split", default="2025-10-01", help="hranice skupin jen z dat před tímto datem")
+    sp.add_argument("--stop-atr", type=float, default=2.0, help="stop v ATR (4h)")
+    sp.add_argument("--target", type=float, default=2.0, help="cíl v R")
+    sp.add_argument("--days", type=int, default=5, help="max. doba držení")
+    sp.set_defaults(func=cmd_edge, equity=0, market=None, margin_usdt=None, risk_usdt=None, risk=None,
+                    max_leverage=None, leverage=None)
 
     args = ap.parse_args(argv)
     scfg, rcfg = StrategyConfig(), RiskConfig()

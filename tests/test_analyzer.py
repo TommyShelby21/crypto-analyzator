@@ -211,3 +211,36 @@ def test_user_level_blocks_target():
     wall = entry + 0.3 * (entry - base.stop)               # tvoje rezistence 0,3R nad vstupem
     lv = suggest_levels(p, "long", entry, rv, [wall])
     assert any("tvoje úroveň" in f.text and f.level == "warn" for f in lv.flags)
+
+
+# --- edge: indikátory nesmí nahlížet do budoucnosti ---
+from analyzer.edge import INDICATORS, compute_indicators, outcomes, quintiles
+
+
+def test_edge_indicators_use_only_past():
+    df = synthetic(2500)
+    funding = pd.Series(np.random.default_rng(3).normal(1e-4, 1e-4, 900),
+                        index=pd.date_range("2021-01-01 08:00", periods=900, freq="8h", tz="UTC"))
+    btc = df["close"] * 1.1
+    scfg = StrategyConfig()
+    full = compute_indicators(prepare(df, scfg), funding, btc)
+    for cut in (1500, 2000, 2400):
+        closed = df.index[cut - 1] + pd.Timedelta("4h")      # funding známý při uzavření poslední svíčky
+        part = compute_indicators(prepare(df.iloc[:cut], scfg), funding[funding.index <= closed], btc.iloc[:cut])
+        pd.testing.assert_frame_equal(part.iloc[-50:], full.iloc[cut - 50:cut])
+    assert set(full.columns) == {i.name for i in INDICATORS}
+
+
+def test_edge_quintiles_from_training_only():
+    idx = pd.date_range("2021-01-01", periods=1000, freq="4h", tz="UTC")
+    df = pd.DataFrame({"x": np.r_[np.arange(500.0), np.full(500, 1e6)]}, index=idx)
+    q = quintiles(df, "x", idx[500])
+    assert set(q.iloc[:500].unique()) == {1.0, 2.0, 3.0, 4.0, 5.0}
+    assert (q.iloc[500:] == 5.0).all()   # extrémy po splitu nemění hranice
+
+
+def test_edge_outcomes_long_only_known_results():
+    p = prepare(synthetic(1500), StrategyConfig())
+    res = outcomes(p, 2.0, 2.0, 30)
+    assert res["R"].iloc[-30:].isna().all()          # výsledek ještě není známý
+    assert res["R"].dropna().between(-10, 2.0).all()
